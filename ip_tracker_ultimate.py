@@ -389,55 +389,254 @@ def search_email_accounts(email):
     return accounts
 
 def analyze_phone_number(phone):
-    """Analisis nomor telepon"""
-    
+    """Analisis nomor telepon dengan detail lengkap + Google Maps link"""
+
     print(f"\n  {C.CYAN}[PHONE ANALYSIS]{C.END} {C.BOLD}Analyzing: {phone}{C.END}")
     print(f"  {C.GRAY}{'─' * 55}{C.END}")
-    
+
+    # ── Auto-install phonenumbers jika belum ada ──────────────
+    try:
+        import phonenumbers
+        from phonenumbers import (
+            geocoder, carrier, timezone,
+            PhoneNumberType, NumberParseException,
+            is_valid_number, is_possible_number,
+            format_number, PhoneNumberFormat,
+        )
+    except ImportError:
+        print(f"     {C.YELLOW}[*]{C.END} Installing phonenumbers library...", end=" ", flush=True)
+        try:
+            subprocess.check_call(
+                [sys.executable, '-m', 'pip', 'install', 'phonenumbers', '-q'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            import phonenumbers
+            from phonenumbers import (
+                geocoder, carrier, timezone,
+                PhoneNumberType, NumberParseException,
+                is_valid_number, is_possible_number,
+                format_number, PhoneNumberFormat,
+            )
+            print(f"{C.GREEN}OK{C.END}")
+        except Exception as e:
+            print(f"{C.RED}FAILED ({e}){C.END}")
+            return {}
+
+    # ── Normalisasi nomor ─────────────────────────────────────
     clean_phone = re.sub(r'[^\d+]', '', phone)
-    
     if clean_phone.startswith('08'):
         clean_phone = '+62' + clean_phone[1:]
-    elif clean_phone.startswith('62'):
+    elif clean_phone.startswith('62') and not clean_phone.startswith('+'):
         clean_phone = '+' + clean_phone
-    
-    print(f"     {C.WHITE}Formatted:{C.END} {clean_phone}")
-    
-    result = {
-        'formatted': clean_phone,
-        'carrier': None,
-        'type': None,
-        'country': None,
+    elif not clean_phone.startswith('+'):
+        clean_phone = '+' + clean_phone
+
+    result = {}
+
+    # ── Parse dengan phonenumbers ─────────────────────────────
+    try:
+        parsed = phonenumbers.parse(clean_phone, None)
+    except Exception:
+        # Coba parse sebagai nomor Indonesia
+        try:
+            parsed = phonenumbers.parse(phone, 'ID')
+        except Exception as e:
+            print(f"     {C.RED}[!]{C.END} Cannot parse number: {e}")
+            return {}
+
+    # ── Validasi ──────────────────────────────────────────────
+    valid   = is_valid_number(parsed)
+    possible = is_possible_number(parsed)
+
+    # Format internasional & lokal
+    fmt_intl  = format_number(parsed, PhoneNumberFormat.INTERNATIONAL)
+    fmt_e164  = format_number(parsed, PhoneNumberFormat.E164)
+    fmt_local = format_number(parsed, PhoneNumberFormat.NATIONAL)
+
+    # Info dasar
+    country_name   = geocoder.description_for_number(parsed, 'id') or 'Unknown'
+    country_code   = parsed.country_code
+    carrier_name   = carrier.name_for_number(parsed, 'id') or 'Unknown'
+    timezones      = timezone.time_zones_for_number(parsed)
+    tz_str         = ', '.join(timezones) if timezones else 'Unknown'
+
+    # Tipe nomor
+    num_type_raw = phonenumbers.number_type(parsed)
+    type_map = {
+        PhoneNumberType.MOBILE:            '📱 Mobile',
+        PhoneNumberType.FIXED_LINE:        '☎️  Fixed Line',
+        PhoneNumberType.FIXED_LINE_OR_MOBILE: '📱/☎️  Fixed/Mobile',
+        PhoneNumberType.TOLL_FREE:         '🆓 Toll Free',
+        PhoneNumberType.PREMIUM_RATE:      '💰 Premium Rate',
+        PhoneNumberType.VOIP:              '🌐 VoIP',
+        PhoneNumberType.UNKNOWN:           '❓ Unknown',
     }
-    
-    if clean_phone.startswith('+62'):
-        prefix = clean_phone[3:6]
-        
-        carrier_map = {
-            '811': 'Telkomsel', '812': 'Telkomsel', '813': 'Telkomsel',
-            '821': 'Telkomsel', '822': 'Telkomsel', '823': 'Telkomsel',
-            '851': 'Telkomsel', '852': 'Telkomsel', '853': 'Telkomsel',
-            '814': 'Indosat', '815': 'Indosat', '816': 'Indosat',
-            '855': 'Indosat', '856': 'Indosat', '857': 'Indosat', '858': 'Indosat',
-            '817': 'XL', '818': 'XL', '819': 'XL',
-            '859': 'XL', '877': 'XL', '878': 'XL',
-            '831': 'Axis', '832': 'Axis', '833': 'Axis', '838': 'Axis',
-            '895': 'Three', '896': 'Three', '897': 'Three',
-            '898': 'Three', '899': 'Three',
-            '881': 'Smartfren', '882': 'Smartfren', '883': 'Smartfren',
-            '884': 'Smartfren', '885': 'Smartfren', '886': 'Smartfren',
-            '887': 'Smartfren', '888': 'Smartfren', '889': 'Smartfren',
-        }
-        
-        carrier = carrier_map.get(prefix, 'Unknown')
-        result['carrier'] = carrier
-        result['country'] = 'Indonesia'
-        result['type'] = 'Mobile'
-        
-        print(f"     {C.GREEN}[+]{C.END} Country: {C.WHITE}Indonesia{C.END}")
-        print(f"     {C.GREEN}[+]{C.END} Carrier: {C.WHITE}{carrier}{C.END}")
-        print(f"     {C.GREEN}[+]{C.END} Type: {C.WHITE}Mobile{C.END}")
-    
+    num_type = type_map.get(num_type_raw, '❓ Unknown')
+
+    # Nomor darurat / khusus
+    is_emergency = phonenumbers.is_emergency_number(clean_phone, 'ID')
+
+    # ── Mapping region Indonesia → koordinat + detail kota ────
+    REGION_COORDS = {
+        # Jawa
+        'Jakarta':        (-6.2088,  106.8456, 'Jakarta, DKI Jakarta, Indonesia',          'Jakarta, DKI Jakarta'),
+        'Bandung':        (-6.9175,  107.6191, 'Kota Bandung, Jawa Barat, Indonesia',       'Bandung, Jawa Barat'),
+        'Surabaya':       (-7.2575,  112.7521, 'Kota Surabaya, Jawa Timur, Indonesia',      'Surabaya, Jawa Timur'),
+        'Yogyakarta':     (-7.7956,  110.3695, 'Kota Yogyakarta, DIY, Indonesia',           'Yogyakarta, DIY'),
+        'Semarang':       (-6.9932,  110.4203, 'Kota Semarang, Jawa Tengah, Indonesia',     'Semarang, Jawa Tengah'),
+        'Malang':         (-7.9839,  112.6214, 'Kota Malang, Jawa Timur, Indonesia',        'Malang, Jawa Timur'),
+        'Solo':           (-7.5755,  110.8243, 'Kota Surakarta (Solo), Jawa Tengah',        'Solo, Jawa Tengah'),
+        'Surakarta':      (-7.5755,  110.8243, 'Kota Surakarta (Solo), Jawa Tengah',        'Solo, Jawa Tengah'),
+        'Depok':          (-6.4025,  106.7942, 'Kota Depok, Jawa Barat, Indonesia',         'Depok, Jawa Barat'),
+        'Tangerang':      (-6.1702,  106.6403, 'Kota Tangerang, Banten, Indonesia',         'Tangerang, Banten'),
+        'Bekasi':         (-6.2349,  106.9921, 'Kota Bekasi, Jawa Barat, Indonesia',        'Bekasi, Jawa Barat'),
+        'Bogor':          (-6.5971,  106.8060, 'Kota Bogor, Jawa Barat, Indonesia',         'Bogor, Jawa Barat'),
+        'Cirebon':        (-6.7063,  108.5570, 'Kota Cirebon, Jawa Barat, Indonesia',       'Cirebon, Jawa Barat'),
+        'Serang':         (-6.1201,  106.1503, 'Kota Serang, Banten, Indonesia',            'Serang, Banten'),
+        'Tasikmalaya':    (-7.3274,  108.2207, 'Kota Tasikmalaya, Jawa Barat, Indonesia',   'Tasikmalaya, Jawa Barat'),
+        'Purwokerto':     (-7.4252,  109.2350, 'Purwokerto, Banyumas, Jawa Tengah',         'Purwokerto, Jawa Tengah'),
+        'Madiun':         (-7.6298,  111.5239, 'Kota Madiun, Jawa Timur, Indonesia',        'Madiun, Jawa Timur'),
+        'Kediri':         (-7.8168,  112.0114, 'Kota Kediri, Jawa Timur, Indonesia',        'Kediri, Jawa Timur'),
+        'Jember':         (-8.1728,  113.7001, 'Kota Jember, Jawa Timur, Indonesia',        'Jember, Jawa Timur'),
+        'Blitar':         (-8.0953,  112.1608, 'Kota Blitar, Jawa Timur, Indonesia',        'Blitar, Jawa Timur'),
+        'Mojokerto':      (-7.4724,  112.4338, 'Kota Mojokerto, Jawa Timur, Indonesia',     'Mojokerto, Jawa Timur'),
+        'Pasuruan':       (-7.6453,  112.9075, 'Kota Pasuruan, Jawa Timur, Indonesia',      'Pasuruan, Jawa Timur'),
+        'Probolinggo':    (-7.7543,  113.2159, 'Kota Probolinggo, Jawa Timur',              'Probolinggo, Jawa Timur'),
+        'Batu':           (-7.8675,  122.5477, 'Kota Batu, Jawa Timur, Indonesia',          'Batu, Jawa Timur'),
+        'Magelang':       (-7.4705,  110.2178, 'Kota Magelang, Jawa Tengah, Indonesia',     'Magelang, Jawa Tengah'),
+        'Pekalongan':     (-6.8887,  109.6753, 'Kota Pekalongan, Jawa Tengah',              'Pekalongan, Jawa Tengah'),
+        'Tegal':          (-6.8797,  109.1256, 'Kota Tegal, Jawa Tengah, Indonesia',        'Tegal, Jawa Tengah'),
+        'Salatiga':       (-7.3306,  110.5078, 'Kota Salatiga, Jawa Tengah, Indonesia',     'Salatiga, Jawa Tengah'),
+        # Sumatera
+        'Medan':          (3.5952,    98.6722, 'Kota Medan, Sumatera Utara, Indonesia',     'Medan, Sumatera Utara'),
+        'Palembang':      (-2.9761,  104.7754, 'Kota Palembang, Sumatera Selatan',          'Palembang, Sumatera Selatan'),
+        'Pekanbaru':      (0.5071,   101.4478, 'Kota Pekanbaru, Riau, Indonesia',           'Pekanbaru, Riau'),
+        'Batam':          (1.0456,   104.0305, 'Kota Batam, Kepulauan Riau, Indonesia',     'Batam, Kepulauan Riau'),
+        'Padang':         (-0.9471,  100.4172, 'Kota Padang, Sumatera Barat, Indonesia',    'Padang, Sumatera Barat'),
+        'Bandar Lampung': (-5.4295,  105.2611, 'Kota Bandar Lampung, Lampung, Indonesia',   'Bandar Lampung, Lampung'),
+        'Banda Aceh':     (5.5483,    95.3238, 'Kota Banda Aceh, Aceh, Indonesia',          'Banda Aceh, Aceh'),
+        'Jambi':          (-1.6101,  103.6131, 'Kota Jambi, Jambi, Indonesia',              'Jambi, Jambi'),
+        'Bengkulu':       (-3.7928,  102.2608, 'Kota Bengkulu, Bengkulu, Indonesia',        'Bengkulu, Bengkulu'),
+        'Pematangsiantar': (2.9595,   99.0687, 'Kota Pematangsiantar, Sumatera Utara',      'Pematangsiantar, Sumut'),
+        # Kalimantan
+        'Balikpapan':     (-1.2654,  116.8312, 'Kota Balikpapan, Kalimantan Timur',        'Balikpapan, Kaltim'),
+        'Pontianak':      (-0.0264,  109.3425, 'Kota Pontianak, Kalimantan Barat',          'Pontianak, Kalimantan Barat'),
+        'Banjarmasin':    (-3.3186,  114.5944, 'Kota Banjarmasin, Kalimantan Selatan',      'Banjarmasin, Kalsel'),
+        'Samarinda':      (-0.5016,  117.1537, 'Kota Samarinda, Kalimantan Timur',          'Samarinda, Kaltim'),
+        'Palangkaraya':   (-2.2161,  113.9135, 'Kota Palangka Raya, Kalimantan Tengah',     'Palangka Raya, Kalteng'),
+        'Tarakan':        (3.3024,   117.6353, 'Kota Tarakan, Kalimantan Utara',            'Tarakan, Kaltara'),
+        # Sulawesi & Timur
+        'Makassar':       (-5.1477,  119.4327, 'Kota Makassar, Sulawesi Selatan, Indonesia','Makassar, Sulawesi Selatan'),
+        'Manado':         (1.4748,   124.8421, 'Kota Manado, Sulawesi Utara, Indonesia',    'Manado, Sulawesi Utara'),
+        'Kendari':        (-3.9985,  122.5127, 'Kota Kendari, Sulawesi Tenggara',           'Kendari, Sultra'),
+        'Palu':           (-0.8917,  119.8707, 'Kota Palu, Sulawesi Tengah, Indonesia',     'Palu, Sulawesi Tengah'),
+        'Gorontalo':      (0.5435,   123.0596, 'Kota Gorontalo, Gorontalo, Indonesia',      'Gorontalo, Gorontalo'),
+        'Denpasar':       (-8.6705,  115.2126, 'Kota Denpasar, Bali, Indonesia',            'Denpasar, Bali'),
+        'Mataram':        (-8.5833,  116.1167, 'Kota Mataram, Nusa Tenggara Barat',         'Mataram, NTB'),
+        'Kupang':         (-10.1772, 123.6070, 'Kota Kupang, Nusa Tenggara Timur',          'Kupang, NTT'),
+        'Ambon':          (-3.6954,  128.1814, 'Kota Ambon, Maluku, Indonesia',             'Ambon, Maluku'),
+        'Jayapura':       (-2.5916,  140.6690, 'Kota Jayapura, Papua, Indonesia',           'Jayapura, Papua'),
+        'Sorong':         (-0.8767,  131.2505, 'Kota Sorong, Papua Barat Daya, Indonesia',  'Sorong, Papua Barat'),
+        # Umum Indonesia (fallback)
+        'Indonesia':      (-2.5489,  118.0149, 'Indonesia',                                 'Indonesia'),
+        'Jawa':           (-7.6145,  110.7122, 'Pulau Jawa, Indonesia',                     'Jawa, Indonesia'),
+        'Sumatera':       (0.5897,   101.3431, 'Pulau Sumatera, Indonesia',                 'Sumatera, Indonesia'),
+        'Kalimantan':     (1.6810,   113.3824, 'Pulau Kalimantan, Indonesia',               'Kalimantan, Indonesia'),
+        'Sulawesi':       (-2.3594,  121.2485, 'Pulau Sulawesi, Indonesia',                 'Sulawesi, Indonesia'),
+        'Bali':           (-8.4095,  115.1889, 'Bali, Indonesia',                           'Bali, Indonesia'),
+        'Papua':          (-4.2699,  138.0804, 'Papua, Indonesia',                          'Papua, Indonesia'),
+    }
+
+    # ── Cari koordinat dari nama region ───────────────────────
+    lat, lon, region_label, search_label = None, None, country_name, country_name
+
+    # Coba dari geocoder dulu (lebih spesifik)
+    geo_desc_en = geocoder.description_for_number(parsed, 'en') or ''
+    geo_desc_id = geocoder.description_for_number(parsed, 'id') or ''
+
+    # Gabungkan semua teks untuk dicocokkan
+    search_text = f"{country_name} {geo_desc_en} {geo_desc_id}"
+
+    for key, (rlat, rlon, rlabel, slabel) in REGION_COORDS.items():
+        if key.lower() in search_text.lower():
+            lat, lon, region_label, search_label = rlat, rlon, rlabel, slabel
+            break
+
+    # Fallback: kalau region generic "Indonesia"
+    if lat is None and 'Indonesia' in search_text:
+        lat, lon, region_label, search_label = REGION_COORDS['Indonesia']
+
+    # ── Buat Google Maps link ──────────────────────────────────
+    maps_url = None
+    maps_search_url = None
+    if lat is not None and lon is not None:
+        # Link koordinat dengan zoom lebih dalam (z=12 = level kota)
+        maps_url = f"https://www.google.com/maps?q={lat},{lon}&z=12"
+        # Link pencarian nama kota (lebih akurat & deskriptif)
+        maps_search_url = f"https://www.google.com/maps/search/{search_label.replace(' ', '+').replace(',', '%2C')}"
+
+    # ── Tampilkan hasil ───────────────────────────────────────
+    print(f"\n  {C.CYAN}{'═' * 57}{C.END}")
+    print(f"  {C.BOLD}  📋  PHONE NUMBER INTELLIGENCE REPORT{C.END}")
+    print(f"  {C.CYAN}{'═' * 57}{C.END}\n")
+
+    status_color = C.GREEN if valid else C.RED
+    status_icon  = '✅' if valid else '❌'
+    print(f"  {C.BOLD}┌─ STATUS{C.END}")
+    print(f"  │  {status_icon} Valid       : {status_color}{valid}{C.END}")
+    print(f"  │  {'✅' if possible else '⚠️ '} Possible   : {C.GREEN if possible else C.YELLOW}{possible}{C.END}")
+    if is_emergency:
+        print(f"  │  {C.RED}🚨 EMERGENCY NUMBER{C.END}")
+
+    print(f"\n  {C.BOLD}┌─ FORMAT{C.END}")
+    print(f"  │  🌐 International : {C.WHITE}{fmt_intl}{C.END}")
+    print(f"  │  📲 E.164         : {C.WHITE}{fmt_e164}{C.END}")
+    print(f"  │  📞 Local         : {C.WHITE}{fmt_local}{C.END}")
+
+    print(f"\n  {C.BOLD}┌─ DETAIL{C.END}")
+    print(f"  │  🌍 Country       : {C.WHITE}{country_name} (+{country_code}){C.END}")
+    print(f"  │  📡 Carrier       : {C.WHITE}{carrier_name}{C.END}")
+    print(f"  │  📱 Type          : {C.WHITE}{num_type}{C.END}")
+    print(f"  │  🕐 Timezone      : {C.WHITE}{tz_str}{C.END}")
+
+    if lat is not None:
+        print(f"\n  {C.BOLD}┌─ ESTIMATED REGION{C.END}")
+        print(f"  │  📍 Area Detail   : {C.WHITE}{region_label}{C.END}")
+        print(f"  │  🗺️  Coordinates   : {C.WHITE}{lat:.4f}, {lon:.4f}{C.END}")
+        if geo_desc_en and geo_desc_en.lower() not in ('indonesia',):
+            print(f"  │  🔎 Geocoder (EN) : {C.WHITE}{geo_desc_en}{C.END}")
+        if geo_desc_id and geo_desc_id != geo_desc_en:
+            print(f"  │  🔎 Geocoder (ID) : {C.WHITE}{geo_desc_id}{C.END}")
+        print(f"\n  {C.BOLD}┌─ GOOGLE MAPS{C.END}")
+        print(f"  │  📌 Koordinat Kota:")
+        print(f"  │     {C.BLUE}{maps_url}{C.END}")
+        if maps_search_url:
+            print(f"  │  🔍 Cari Nama Kota (lebih akurat):")
+            print(f"  │     {C.CYAN}{maps_search_url}{C.END}")
+        print(f"  │  {C.GRAY}(Estimasi area dari nomor seri, bukan GPS pasti){C.END}")
+
+    print(f"\n  {C.CYAN}{'═' * 57}{C.END}\n")
+
+    result = {
+        'formatted_intl': fmt_intl,
+        'formatted_e164': fmt_e164,
+        'formatted_local': fmt_local,
+        'valid': valid,
+        'possible': possible,
+        'country': country_name,
+        'country_code': country_code,
+        'carrier': carrier_name,
+        'type': num_type,
+        'timezone': tz_str,
+        'region_label': region_label,
+        'search_label': search_label,
+        'geocoder_en': geo_desc_en,
+        'geocoder_id': geo_desc_id,
+        'lat': lat,
+        'lon': lon,
+        'maps_url': maps_url,
+        'maps_search_url': maps_search_url,
+    }
     return result
 
 # ==========================================
@@ -712,9 +911,30 @@ def main():
                         print(f"\n  {C.CYAN}▶ Detailed Address:{C.END}")
                         for addr in detailed:
                             print(f"    {C.MAGENTA}{addr['source']}:{C.END}")
-                            display = addr['display']
-                            for part in display.split(', ')[:5]:
-                                print(f"      {C.GREEN}• {part}{C.END}")
+                            a = addr.get('address', {})
+                            if addr['source'] == 'OpenStreetMap' and a:
+                                fields = [
+                                    ('🏠 Jalan/Bangunan', a.get('road') or a.get('pedestrian') or a.get('amenity', '')),
+                                    ('🏘️  Kelurahan/Desa', a.get('village') or a.get('suburb') or a.get('neighbourhood', '')),
+                                    ('🏙️  Kecamatan',      a.get('county') or a.get('district', '')),
+                                    ('🌆 Kota/Kabupaten',  a.get('city') or a.get('town') or a.get('municipality', '')),
+                                    ('🗺️  Provinsi',        a.get('state', '')),
+                                    ('🌍 Negara',          a.get('country', '')),
+                                    ('📮 Kode Pos',        a.get('postcode', '')),
+                                ]
+                                for label, val in fields:
+                                    if val:
+                                        print(f"      {C.GREEN}{label}: {C.WHITE}{val}{C.END}")
+                                print(f"      {C.GRAY}Full: {addr['display'][:120]}{C.END}")
+                            else:
+                                for label, val in [
+                                    ('🌆 Kota',    a.get('city', '')),
+                                    ('🏘️  Lokal',   a.get('locality', '')),
+                                    ('🗺️  Provinsi', a.get('state', '')),
+                                    ('🌍 Negara',   a.get('country', '')),
+                                ]:
+                                    if val:
+                                        print(f"      {C.GREEN}{label}: {C.WHITE}{val}{C.END}")
                     
                     print(f"\n  {C.CYAN}▶ Google Maps:{C.END}")
                     print(f"    {C.BLUE}https://www.google.com/maps?q={avg_lat},{avg_lon}&z=16{C.END}")
